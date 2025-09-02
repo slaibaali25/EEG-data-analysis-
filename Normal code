@@ -1,0 +1,131 @@
+import os
+import mne
+import numpy as np
+import pandas as pd
+from pathlib import Path
+from sklearn.preprocessing import StandardScaler
+
+# Path configuration
+data_root = Path(r"C:/Users/DELL/Desktop/normal patient datasett/files")
+save_dir = data_root / "preprocessed_trials" / "normal"
+save_dir.mkdir(parents=True, exist_ok=True)
+
+# Selected 12 channels
+selected_channels = [
+    'C3', 'C4', 'CZ',
+    'CP3', 'CP4', 'FC3', 'FC4',
+    'CPZ', 'PZ', 'FZ',
+    'T7', 'T8'
+]
+
+runs = [4, 8, 12]
+label = 1  # For normal
+trial_duration_sec = 4.0
+
+# Loop through each subject
+for subj_num in range(1, 110):
+    subject = f"S{subj_num:03}"
+    subj_folder = data_root / subject
+    output_dir = save_dir / subject
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trial_counter = 1
+
+    print(f"\n==========================\n📁 Subject: {subject}")
+
+    for run in runs:
+        edf_file = f"{subject}R{run:02}.edf"
+        edf_path = subj_folder / edf_file
+
+        if not edf_path.exists():
+            print(f"⚠ Missing: {edf_path}")
+            continue
+
+        print(f"▶ Processing {edf_file}")
+        try:
+            raw = mne.io.read_raw_edf(edf_path, preload=True, verbose=False)
+
+            # Clean channel names
+            cleaned_names = {ch: ch.replace('.', '').upper() for ch in raw.ch_names}
+            raw.rename_channels(cleaned_names)
+
+            # Pick only required 12 channels (if available)
+            picked_channels = [ch for ch in selected_channels if ch in raw.ch_names]
+            raw.pick_channels(picked_channels)
+
+            # Preprocessing
+            raw.interpolate_bads()
+            raw.filter(0.5, 40., fir_design='firwin')
+            raw.set_eeg_reference('average', projection=False)
+
+            # ICA for artifact removal (n_components = number of channels or fewer)
+            n_components = min(12, len(raw.ch_names))
+            ica = mne.preprocessing.ICA(n_components=n_components, random_state=42, max_iter='auto')
+            ica.fit(raw)
+            raw = ica.apply(raw)
+
+            # Use only annotated segments with 'T1' or 'T2'
+            if len(raw.annotations) == 0:
+                print("⚠ No annotations found.")
+                continue
+
+            for annot in raw.annotations:
+                if annot['description'].strip().upper() not in ['T1', 'T2']:
+                    continue
+
+                onset_sec = annot['onset']
+                end_sec = onset_sec + trial_duration_sec
+                if end_sec >= raw.times[-1]:
+                    continue
+
+                trial = raw.copy().crop(tmin=onset_sec, tmax=end_sec)
+                data = trial.get_data().T  # (samples, channels)
+
+                # Normalize
+                data = StandardScaler().fit_transform(data)
+
+                # Save to CSV
+                df = pd.DataFrame(data, columns=trial.ch_names)
+                df.insert(0, "duration_sec", trial_duration_sec)
+                df.insert(0, "onset_sec", onset_sec)
+                df.insert(0, "label", label)
+                df.insert(0, "trial_id", f"trial_{trial_counter:02}")
+
+                trial_path = output_dir / f"trial_{trial_counter:02}.csv"
+                df.to_csv(trial_path, index=False)
+                trial_counter += 1
+
+            print(f"✅ Done! Total trials: {trial_counter - 1}")
+
+        except Exception as e:
+            print(f"❌ Error in {edf_path}: {e}")
+import pandas as pd
+from pathlib import Path
+
+# Define the selected channels (upper-case for consistency)
+selected_channels = [
+    'C3', 'C4', 'CZ',
+    'CP3', 'CP4', 'FC3', 'FC4',
+    'CPZ', 'PZ', 'FZ'
+]
+
+# Required metadata columns (keep same)
+required_columns = ['TIME', 'EPOCH', 'LABELS'] + selected_channels
+
+# Path to stroke data trials
+alltrials_dir = Path("alltrials")
+
+# Loop through all CSV files in subfolders
+for csv_file in alltrials_dir.rglob("*.csv"):
+    df = pd.read_csv(csv_file)
+
+    # Convert all column names to UPPERCASE for consistency
+    df.columns = [col.upper() for col in df.columns]
+
+    # Keep only required columns that are present in the file
+    existing_columns = [col for col in required_columns if col in df.columns]
+    df = df[existing_columns]
+
+    # Save updated CSV
+    df.to_csv(csv_file, index=False)
+
+    print(f"Updated: {csv_file}")
