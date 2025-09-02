@@ -1,0 +1,137 @@
+import os
+from pathlib import Path
+import mne
+import pandas as pd
+from mne.preprocessing import ICA
+
+## Function to preprocess EDF and export trials as CSV ##
+def preprocess_and_export(edf_path, ev_df, output_dir,
+                          skip_trial_type=2,
+                          l_freq=1.0, h_freq=49.0,
+                          notch_freqs=[50.0],
+                          d0_ica=True,
+                          ica_n_components=20):
+    # Read EDF file
+    raw = mne.io.read_raw_edf(edf_path, preload=True)
+
+    # Drop unnamed channel (if present)
+    raw.drop_channels([''], on_missing='ignore')
+
+    # Filtering
+    raw.filter(l_freq, h_freq)
+    raw.notch_filter(notch_freqs)
+
+    # Interpolate bad channels
+    raw.set_channel_types({'HEOL': 'eog', 'HEOR': 'eog'})
+    raw.set_montage("standard_1020", match_case=False, on_missing='warn')
+    raw.info['bads'] = ['CPz']
+    raw.interpolate_bads(reset_bads=False)
+
+    # ICA
+    if d0_ica:
+        ica = ICA(n_components=ica_n_components, random_state=42)
+        ica.fit(raw)
+        ica.apply(raw)
+
+    # Resample
+    raw.resample(160, npad="auto")
+
+    # Filter events to stim2.mp4 and remove skip_trial_type
+    ev = ev_df.copy()
+    ev = ev[ev['stim_file'] == 'stim2.mp4']
+    ev = ev[ev['trial_type'] != skip_trial_type].reset_index(drop=True)
+
+    # Convert onset/duration to seconds
+    ev['onset_s'] = ev['onset'] / 1000.0
+    ev['duration_s'] = ev['duration'] / 1000.0
+
+    # Trim events that exceed recording
+    max_time = raw.times[-1]
+    ev = ev[ev['onset_s'] + ev['duration_s'] <= max_time].reset_index(drop=True)
+    if ev.empty:
+        raise RuntimeError("No valid events after trimming to data length.")
+
+    # Set annotations
+    ann = mne.Annotations(
+        onset=ev['onset_s'].tolist(),
+        duration=ev['duration_s'].tolist(),
+        description=ev['trial_type'].astype(str).tolist()
+    )
+    raw.set_annotations(ann)
+    events, event_id = mne.events_from_annotations(raw)
+
+    # Create epochs
+    epochs = mne.Epochs(
+        raw, events, event_id=event_id,
+        tmin=0.0, tmax=4.0,
+        baseline=None, preload=True,
+        reject=None, flat=None,
+        reject_by_annotation=False
+    )
+    epochs.drop_bad()
+
+    # Export each epoch to CSV
+    data, times, ch_names = epochs.get_data(), epochs.times, epochs.ch_names
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for i in range(len(epochs)):
+        df = pd.DataFrame(data[i].T, columns=ch_names)
+        df.insert(0, 'time', times)
+        df.insert(0, 'epoch', i)
+        df['labels'] = 0  # default label
+        fname = f'epoch_{i:02d}.csv'
+        df.to_csv(output_dir / fname, index=False)
+
+    print(f"{output_dir.name}: {len(epochs)} epochs are exported")
+
+# ==== Main code starts here ====
+if _name_ == "_main_":
+    base_dir = Path(r"C:\Users\DELL\Desktop\edffile\edffile")
+    events_tsv = Path(r"C:\Users\DELL\Desktop\task-motor-imagery_events.tsv")
+
+    ev_df = pd.read_csv(events_tsv, sep='\t')
+    ev_df = ev_df.loc[:, ~ev_df.columns.str.contains('^Unnamed', case=False)]
+
+    # Loop through EDF files
+    for edf_path in base_dir.rglob("*.edf"):
+        subject_dir = edf_path.parent.parent
+        subj_name = subject_dir.name
+        output_dir = Path("alltrials") / subj_name
+
+        try:
+            preprocess_and_export(
+                edf_path=str(edf_path),
+                ev_df=ev_df,
+                output_dir=output_dir,
+                skip_trial_type=2
+            )
+        except Exception as e:
+            print(f"{subj_name} failed: {e}")
+            import pandas as pd
+from pathlib import Path
+
+# Define limited selected channels
+selected_channels = [
+    'C3', 'C4', 'Cz',
+    'CP3', 'CP4', 'FC3', 'FC4',
+    'CPz', 'Pz', 'Fz'
+]
+
+# Required columns to keep (metadata + EEG channels)
+required_columns = ['trial_id', 'label', 'onset_sec', 'duration_sec'] + selected_channels
+
+# Path where previous CSV files are stored
+base_path = Path(r"C:/Users/DELL/Desktop/normal patient datasett/files/preprocessed_trials/normal")
+
+# Loop through all trial CSVs and update them
+for csv_file in base_path.rglob("*.csv"):
+    df = pd.read_csv(csv_file)
+
+ # Filter only the required columns that exist
+ existing_cols = [col for col in required_columns if col in df.columns]
+ df = df[existing_cols]
+# python
+df = df[[col for col in selected_channels if col in df.columns]]
+df.to_csv(csv_file, index=False)
+print(f"✅ Updated: {csv_file}")
+
